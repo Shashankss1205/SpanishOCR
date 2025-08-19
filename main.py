@@ -1,6 +1,7 @@
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse
+from fastapi.staticfiles import StaticFiles
 import cv2
 import numpy as np
 from PIL import Image, ImageOps
@@ -44,25 +45,12 @@ app.add_middleware(
 
 # Global variables for model and configurations
 inference_model = None
-# char_to_num = None
-# num_to_char = None
 n_classes=50
 IMG_WIDTH = 200
 IMG_HEIGHT = 50
 MAX_LABEL_LENGTH = None
-# AUTOTUNE
 AUTOTUNE = tfd.AUTOTUNE
-# Batch Size
 BATCH_SIZE = 16
-
-# Character mapping for corrections
-# CHARACTER_MAPPING = {
-#     'в': 'o',
-#     'д': 'ñ',
-#     'б': 'i',
-#     'В': 'e',
-#     'а': 'a'
-# }
 
 class CTCLayer(layers.Layer):
     def __init__(self, **kwargs) -> None:
@@ -76,33 +64,14 @@ class CTCLayer(layers.Layer):
         self.add_loss(loss)
         return y_pred
 
-
 def load_model_and_setup():
     """Load the trained OCR model and setup character mappings"""
     global inference_model, char_to_num, num_to_char, MAX_LABEL_LENGTH
     
     try:
-        # Define unique characters (update this with your actual character set)
-        # unique_chars = {'e', 'j', 'Q', 'z', 'v', 'A', 'L', 't', 'V', 'O', 'c', 'q', 'l', 'a', 'ñ', 'B', 'P', ',', 'H', 'C', 'M', 'G', 's', 'r', 'T', 'd', 'g', 'p', 'D', 'S', 'N', 'b', 'm', 'u', 'o', 'f', 'I', 'x', 'R', 'y', 'n', 'i', '-', 'F', 'E', 'h'}
-        
-        # # Character to numeric mapping
-        # char_to_num = layers.StringLookup(
-        #     vocabulary=list(unique_chars),
-        #     mask_token=None
-        # )
-        
-        # # Reverse mapping
-        # num_to_char = layers.StringLookup(
-        #     vocabulary=char_to_num.get_vocabulary(),
-        #     mask_token=None,
-        #     invert=True
-        # )
-        
-        # Load your trained model
-        model_path = 'ocr_model_NEW.h5'  # Update with your model path
+        model_path = 'ocr_model_NEW.h5'
         if os.path.exists(model_path):
             full_model = keras.models.load_model(model_path, compile=False, custom_objects={'CTCLayer': CTCLayer})
-            # Create inference model
             inference_model = keras.Model(
                 inputs=full_model.get_layer(name="image").input,
                 outputs=full_model.get_layer(name='dense_1').output
@@ -112,64 +81,34 @@ def load_model_and_setup():
             logger.error(f"Model file not found: {model_path}")
             raise FileNotFoundError(f"Model file not found: {model_path}")
         
-        # Set MAX_LABEL_LENGTH (update with your actual value)
-        MAX_LABEL_LENGTH = 24  # Update this based on your training data
+        MAX_LABEL_LENGTH = 24
         
     except Exception as e:
         logger.error(f"Error loading model: {e}")
         raise
 
 def load_image(image_path : str):
-    '''
-    This function loads and preprocesses images. It first receives the image path, which is used to
-    decode the image as a JPEG using TensorFlow. Then, it converts the image to a tensor and applies
-    two processing functions: resizing and normalization. The processed image is then returned by
-    the function.
-
-    Argument :
-        image_path : The path of the image file to be loaded.
-
-    Return:
-        image : The loaded image as a tensor.
-    '''
-
-    # Read the Image
     image = tf.io.read_file(image_path)
-
-    # Decode the image
     decoded_image = tf.image.decode_jpeg(contents = image, channels = 1)
-
-    # Convert image data type.
     cnvt_image = tf.image.convert_image_dtype(image = decoded_image, dtype = tf.float32)
-
-    # Resize the image
     resized_image = tf.image.resize(images = cnvt_image, size = (IMG_HEIGHT, IMG_WIDTH))
-
-    # Transpose
     image = tf.transpose(resized_image, perm = [1, 0, 2])
-
-    # Convert image to a tensor.
     image = tf.cast(image, dtype = tf.float32)
-
-    # Return loaded image
     return image
 
 def apply_craft_detection(image_path: str, output_dir: str) -> str:
     """Apply CRAFT model for text detection"""
     try:
-        # Create output directory if it doesn't exist
         os.makedirs(output_dir, exist_ok=True)
         
-        # Command to run CRAFT model
         craft_command = [
             'python3', 'CRAFT_Model/CRAFT/BoundBoxFunc/test.py',
-            '--cuda', '0',  # Use CPU, change to '1' if GPU available
+            '--cuda', '0',
             '--result_folder', output_dir,
             '--test_folder', os.path.dirname(image_path),
             '--trained_model', 'CRAFT_Model/CRAFT/BoundBoxFunc/weights/craft_mlt_25k.pth'
         ]
         
-        # Run CRAFT detection
         result = subprocess.run(craft_command, capture_output=True, text=True)
         
         if result.returncode != 0:
@@ -183,53 +122,26 @@ def apply_craft_detection(image_path: str, output_dir: str) -> str:
         logger.error(f"Error in CRAFT detection: {e}")
         raise
 
-# def sort_bounding_boxes(bounding_box_file: str) -> List[List[int]]:
-#     """Sort bounding boxes based on Spanish reading order (top to bottom, left to right)"""
-#     try:
-#         bounding_boxes = []
-        
-#         with open(bounding_box_file, 'r') as f:
-#             for line in f:
-#                 coords = list(map(int, line.strip().split(',')[:8]))  # Take first 8 coordinates
-#                 bounding_boxes.append(coords)
-        
-#         # Sort by y-coordinate (top to bottom), then by x-coordinate (left to right)
-#         bounding_boxes.sort(key=lambda box: (box[1], box[0]))
-        
-#         return bounding_boxes
-        
-#     except Exception as e:
-#         logger.error(f"Error sorting bounding boxes: {e}")
-#         return []
-
 def count_files_in_folder(folder_path, extensions_list):
-    # Initialize counter for files
     file_count = 0
-
-    # Iterate through all files in the folder
     for filename in os.listdir(folder_path):
-        # Check if the file ends with the given file extension
         for extension in extensions_list:
             if filename.lower().endswith(extension):
                 file_count += 1
-
     return file_count
 
 def process_bounding_boxes(file_path):
     with open(file_path, "r") as file:
         lines = file.readlines()
 
-    # Parse bounding box coordinates
     bounding_boxes = []
     for line in lines:
         coords = list(map(int, line.strip().split(',')))
         bounding_boxes.append(coords)
 
-    # Sort bounding boxes based on y_min value
     bounding_boxes.sort(key=lambda box: box[1])
 
-    vertical_distance_between_lines = 10   #Change it according to the dataset, you are using
-    # Group bounding boxes based on difference between max and min y_min values
+    vertical_distance_between_lines = 10
     grouped_boxes = []
     current_group = []
     for box in bounding_boxes:
@@ -244,11 +156,9 @@ def process_bounding_boxes(file_path):
                 grouped_boxes.append(current_group)
                 current_group = [box]
 
-    # Append the last group
     if current_group:
         grouped_boxes.append(current_group)
 
-    # Sort each group based on x_min value
     for group in grouped_boxes:
         group.sort(key=lambda box: box[0])
 
@@ -257,7 +167,6 @@ def process_bounding_boxes(file_path):
 def sort_bounding_boxes(bounding_box_file):
     sorted_bounding_boxes = process_bounding_boxes(bounding_box_file)
 
-    # Write sorted bounding boxes to text file in output directory
     output_file_path = f"{os.path.splitext(bounding_box_file)[0]}_sorted.txt"
     with open(output_file_path, "w") as outfile:
         for group in sorted_bounding_boxes:
@@ -267,13 +176,10 @@ def sort_bounding_boxes(bounding_box_file):
     return output_file_path
 
 def extract_bounding_boxes(image_path, bounding_boxes_file, output_folder, word):
-    # Read the main image
     main_image = cv2.imread(image_path)
-    # Create the output folder if it doesn't exist
     if not os.path.exists(output_folder):
         os.makedirs(output_folder)
 
-    # Read bounding box coordinates from the text file
     with open(bounding_boxes_file, 'r') as f:
         bounding_boxes_data = f.read().split(';')
     bounding_boxes_data = bounding_boxes_data[1:]
@@ -284,10 +190,8 @@ def extract_bounding_boxes(image_path, bounding_boxes_file, output_folder, word)
             coordinates_list = [int(coord) for coord in bounding_box_coords[cnt].split(',')]
             x_min, y_min, x_max, y_min, x_max, y_max, x_min, y_max = coordinates_list
 
-            # Extract the bounding box from the main image
             bounding_box = main_image[y_min:y_max, x_min:x_max]
 
-            # Save the bounding box as a separate image
             output_path = os.path.join(output_folder, f'{word};{line}.png')
             cv2.imwrite(output_path, bounding_box)
 
@@ -297,38 +201,30 @@ def extract_bounding_boxes(image_path, bounding_boxes_file, output_folder, word)
     return word
 
 def pad_and_resize_images(folder_path):
-    # Ensure the folder exists
     if not os.path.exists(folder_path):
         raise ValueError(f"The folder {folder_path} does not exist")
 
-    # Define the target aspect ratio and size
-    target_aspect_ratio = 4  # 1:4 aspect ratio
+    target_aspect_ratio = 4
     target_width = 200
     target_height = 40
 
-    # Iterate through all files in the folder
     for filename in os.listdir(folder_path):
         file_path = os.path.join(folder_path, filename)
         if os.path.isfile(file_path):
             try:
-                # Open the image
                 with Image.open(file_path) as img:
                     img = img.convert('L')
                     width, height = img.size
                     aspect_ratio = width / height
 
                     if aspect_ratio < target_aspect_ratio:
-                        # Calculate padding to make aspect ratio 1:4
                         new_width = height * 4
                         padding = (new_width - width) // 2
                         padded_img = ImageOps.expand(img, border=(padding, 0, padding, 0), fill='white')
                     else:
                         padded_img = img
 
-                    # Resize the image to 200x40
                     resized_img = padded_img.resize((target_width, target_height))
-
-                    # Save the processed image back to the original path
                     resized_img.save(file_path)
 
                     print(f"Processed and replaced: {file_path}")
@@ -336,265 +232,569 @@ def pad_and_resize_images(folder_path):
                 print(f"Error processing {file_path}: {e}")
 
 def create_csv_from_folder(folder_path, csv_file_path):
-    # Get a list of all files in the folder
     files = [f for f in os.listdir(folder_path) if os.path.isfile(os.path.join(folder_path, f))]
 
-    # Create or overwrite the CSV file
     with open(csv_file_path, 'w', newline='') as csv_file:
-        # Create a CSV writer object
         csv_writer = csv.writer(csv_file)
-
-        # Write the header row
         csv_writer.writerow(['FILENAME', 'IDENTITY'])
 
-        # Write data rows, excluding files with the name ".png"
         for file_name in files:
             if file_name.lower() == ".png":
-                continue  # Skip files with the name ".png"
+                continue
 
-            # file_path = os.path.join(folder_path, file_name)
-
-            # Remove the file extension (assuming it's three characters long, like '.png')
             file_name_without_extension = os.path.splitext(file_name)[0]
-
             csv_writer.writerow([file_name, file_name_without_extension])
 
     print(f'CSV file "{csv_file_path}" created successfully.')
 
-
-
 def encode_single_sample(image_path : str, label : str):
-
-    '''
-    The function takes an image path and label as input and returns a dictionary containing the processed image tensor and the label tensor.
-    First, it loads the image using the load_image function, which decodes and resizes the image to a specific size. Then it converts the given
-    label string into a sequence of Unicode characters using the unicode_split function. Next, it uses the char_to_num layer to convert each
-    character in the label to a numerical representation. It pads the numerical representation with a special class (n_classes)
-    to ensure that all labels have the same length (MAX_LABEL_LENGTH). Finally, it returns a dictionary containing the processed image tensor
-    and the label tensor.
-
-    Arguments :
-        image_path : The location of the image file.
-        label      : The text to present in the image.
-
-    Returns:
-        dict : A dictionary containing the processed image and label.
-    '''
-
-    # Get the image
     image = load_image(image_path)
-
-    # Convert the label into characters
     chars = tf.strings.unicode_split(label, input_encoding='UTF-8')
-
-    # Convert the characters into vectors
     vecs = char_to_num(chars)
-
-    # Pad label
     pad_size = MAX_LABEL_LENGTH - tf.shape(vecs)[0]
     vecs = tf.pad(vecs, paddings = [[0, pad_size]], constant_values=n_classes+1)
-
     return {'image':image, 'label':vecs}
 
-def extract_word_images(image_path: str, bounding_boxes: List[List[int]]) -> List[np.ndarray]:
-    """Extract word images from bounding boxes"""
-    try:
-        # Load the image
-        image = cv2.imread(image_path)
-        if image is None:
-            raise ValueError(f"Could not load image: {image_path}")
-        
-        word_images = []
-        
-        for bbox in bounding_boxes:
-            # Extract coordinates
-            x_coords = bbox[::2]  # Every other element starting from 0
-            y_coords = bbox[1::2]  # Every other element starting from 1
-            
-            # Get bounding rectangle
-            x_min, x_max = min(x_coords), max(x_coords)
-            y_min, y_max = min(y_coords), max(y_coords)
-            
-            # Extract word image
-            word_img = image[y_min:y_max, x_min:x_max]
-            import matplotlib.pyplot as plt
-            plt.plot(word_img)
-            plt.savefig("image0.png")
-            if word_img.size > 0:
-                word_images.append(word_img)
-            
-        return word_images
-        
-    except Exception as e:
-        logger.error(f"Error extracting word images: {e}")
-        return []
-
-
-def preprocess_word_image(word_image: np.ndarray) -> np.ndarray:
-    """
-    Preprocess a word image for model input.
-
-    Steps:
-    - Convert to grayscale
-    - Pad to maintain aspect ratio (target 1:4)
-    - Resize to (200, 50)
-    - Normalize pixel values to [0, 1]
-    - Transpose shape to match (height, width, channel)
-
-    Args:
-        word_image (np.ndarray): Input image as a NumPy array.
-
-    Returns:
-        np.ndarray: Preprocessed image ready for model input.
-    """
-    try:
-        target_aspect_ratio = 4  # 1:4
-        target_width = IMG_WIDTH
-        target_height = IMG_HEIGHT
-
-        # Convert color image to grayscale if needed
-        if len(word_image.shape) == 3:
-            word_image = cv2.cvtColor(word_image, cv2.COLOR_BGR2RGB)
-        img = Image.fromarray(word_image).convert('L')
-        import matplotlib.pyplot as plt
-        plt.plot(img)
-        plt.savefig("image1.png")
-        # Get current size and aspect ratio
-        width, height = img.size
-        aspect_ratio = width / height
-
-        # Pad if aspect ratio is less than target
-        if aspect_ratio < target_aspect_ratio:
-            new_width = height * target_aspect_ratio
-            padding = (int((new_width - width) // 2), 0)
-            img = ImageOps.expand(img, border=(padding[0], 0, padding[0], 0), fill='white')
-
-        # Resize
-        img = img.resize((target_width, target_height))
-
-        # Convert to NumPy
-        img_array = np.array(img).astype(np.float32)  # shape (H, W)
-        import matplotlib.pyplot as plt
-        plt.plot(img)
-        plt.savefig("image2.png")
-
-        # Add channel dimension and transpose to (H, W, 1)
-        img_array = img_array[:, :, np.newaxis]
-        img_array = np.transpose(img_array, (1, 0, 2))  # shape (W, H, 1) → (H, W, 1)
-
-        return img_array
-
-    except Exception as e:
-        logger.error(f"Error preprocessing word image: {e}")
-        return None
-
-def decode_prediction(pred_label: np.ndarray) -> List[str]:
-    """Decode model predictions to text"""
-    try:
-        # Input length
-        input_len = np.ones(shape=pred_label.shape[0]) * pred_label.shape[1]
-        
-        # CTC decode
-        decode = keras.backend.ctc_decode(
-            pred_label, 
-            input_length=input_len, 
-            greedy=True, 
-        )[0][0][:, :MAX_LABEL_LENGTH]
-        
-        # Convert back to characters
-        chars = num_to_char(decode)
-        
-        # Join characters
-        texts = [tf.strings.reduce_join(inputs=char).numpy().decode('UTF-8') for char in chars]
-        
-        # Clean up text
-        filtered_texts = [text.replace('[UNK]', " ").strip() for text in texts]
-        
-        return filtered_texts
-        
-    except Exception as e:
-        logger.error(f"Error decoding predictions: {e}")
-        return []
-
-# Set the new size in pixels (width, height) according to your choice
 def resize_images_in_folder(input_folder, new_size=(200,50)):
-    # Loop through all files in the input folder
     for filename in os.listdir(input_folder):
-        # Open the image
         with Image.open(os.path.join(input_folder, filename)) as img:
-            # Resize the image
             resized_img = img.resize(new_size)
-            # Save the resized image to the output folder
-            output_filename = os.path.splitext(filename)[0] + '.png'  # Ensure output format is PNG
+            output_filename = os.path.splitext(filename)[0] + '.png'
             resized_img.save(os.path.join(input_folder, output_filename))
 
 def decode_pred(pred_label):
-
-    '''
-    The decode_pred function is used to decode the predicted labels generated by the OCR model.
-    It takes a matrix of predicted labels as input, where each time step represents the probability
-    for each character. The function uses CTC decoding to decode the numeric labels back into their
-    character values. The function also removes any unknown tokens and returns the decoded texts as a
-    list of strings. The function utilizes the num_to_char function to map numeric values back to their
-    corresponding characters. Overall, the function is an essential step in the OCR process, as it allows
-    us to obtain the final text output from the model's predictions.
-
-    Argument :
-        pred_label : These are the model predictions which are needed to be decoded.
-
-    Return:
-        filtered_text : This is the list of all the decoded and processed predictions.
-
-    '''
-
-    # Input length
     input_len = np.ones(shape=pred_label.shape[0]) * pred_label.shape[1]
-
-    # CTC decode
     decode = keras.backend.ctc_decode(pred_label, input_length=input_len, greedy=False, beam_width=5)[0][0][:,:MAX_LABEL_LENGTH]
-
-    # Converting numerics back to their character values
     chars = num_to_char(decode)
-
-    # Join all the characters
     texts = [tf.strings.reduce_join(inputs=char).numpy().decode('UTF-8') for char in chars]
-
-    # Remove the unknown token
     filtered_texts = [text.replace('[UNK]', " ").strip() for text in texts]
-
     return filtered_texts
 
-def predict_word_images(word_images: List[np.ndarray]) -> List[str]:
-    """Predict text from word images"""
-    try:
-        if not word_images:
-            return []
+# HTML template for the frontend
+HTML_TEMPLATE = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OCR Text Recognition</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 20px;
+        }
+
+        .container {
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+            border-radius: 20px;
+            padding: 40px;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.1);
+            max-width: 800px;
+            width: 100%;
+            margin-top: 20px;
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 40px;
+        }
+
+        .header h1 {
+            color: #333;
+            font-size: 2.5em;
+            margin-bottom: 10px;
+            background: linear-gradient(45deg, #667eea, #764ba2);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .header p {
+            color: #666;
+            font-size: 1.1em;
+        }
+
+        .upload-section {
+            margin-bottom: 30px;
+        }
+
+        .upload-area {
+            border: 3px dashed #667eea;
+            border-radius: 15px;
+            padding: 40px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            background: linear-gradient(45deg, rgba(102, 126, 234, 0.05), rgba(118, 75, 162, 0.05));
+        }
+
+        .upload-area:hover {
+            border-color: #764ba2;
+            background: linear-gradient(45deg, rgba(102, 126, 234, 0.1), rgba(118, 75, 162, 0.1));
+            transform: translateY(-2px);
+        }
+
+        .upload-area.dragover {
+            border-color: #764ba2;
+            background: linear-gradient(45deg, rgba(102, 126, 234, 0.15), rgba(118, 75, 162, 0.15));
+        }
+
+        .upload-icon {
+            font-size: 4em;
+            color: #667eea;
+            margin-bottom: 20px;
+        }
+
+        .upload-text {
+            color: #333;
+            font-size: 1.2em;
+            margin-bottom: 10px;
+        }
+
+        .upload-subtext {
+            color: #666;
+            font-size: 0.9em;
+        }
+
+        #fileInput {
+            display: none;
+        }
+
+        .btn {
+            background: linear-gradient(45deg, #667eea, #764ba2);
+            color: white;
+            border: none;
+            padding: 12px 30px;
+            border-radius: 25px;
+            cursor: pointer;
+            font-size: 1em;
+            font-weight: 600;
+            transition: all 0.3s ease;
+            margin: 10px;
+        }
+
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(102, 126, 234, 0.3);
+        }
+
+        .btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .preview-section {
+            margin-bottom: 30px;
+            display: none;
+        }
+
+        .preview-container {
+            display: flex;
+            gap: 20px;
+            flex-wrap: wrap;
+        }
+
+        .image-preview {
+            flex: 1;
+            min-width: 300px;
+        }
+
+        .image-preview img {
+            width: 100%;
+            max-height: 400px;
+            object-fit: contain;
+            border-radius: 10px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
+        }
+
+        .results-section {
+            display: none;
+        }
+
+        .results-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+
+        .results-header h3 {
+            color: #333;
+            font-size: 1.5em;
+        }
+
+        .copy-btn {
+            background: #28a745;
+            font-size: 0.9em;
+            padding: 8px 16px;
+        }
+
+        .copy-btn:hover {
+            background: #218838;
+        }
+
+        .results-text {
+            background: #f8f9fa;
+            border: 1px solid #e9ecef;
+            border-radius: 10px;
+            padding: 20px;
+            min-height: 150px;
+            font-family: 'Courier New', monospace;
+            font-size: 1.1em;
+            line-height: 1.6;
+            color: #333;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+
+        .loading {
+            display: none;
+            text-align: center;
+            padding: 20px;
+        }
+
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #667eea;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 15px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .error {
+            background: #f8d7da;
+            color: #721c24;
+            padding: 15px;
+            border-radius: 10px;
+            margin: 20px 0;
+            border: 1px solid #f5c6cb;
+        }
+
+        .success {
+            background: #d4edda;
+            color: #155724;
+            padding: 15px;
+            border-radius: 10px;
+            margin: 20px 0;
+            border: 1px solid #c3e6cb;
+        }
+
+        .model-info {
+            background: linear-gradient(45deg, rgba(102, 126, 234, 0.1), rgba(118, 75, 162, 0.1));
+            border-radius: 15px;
+            padding: 20px;
+            margin-bottom: 30px;
+            text-align: center;
+        }
+
+        .model-info h3 {
+            color: #333;
+            margin-bottom: 10px;
+        }
+
+        .model-info p {
+            color: #666;
+            font-size: 0.9em;
+        }
+
+        .api-status {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            margin-bottom: 20px;
+            padding: 10px;
+            border-radius: 10px;
+            font-size: 0.9em;
+        }
+
+        .api-status.online {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+
+        .api-status.offline {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+
+        .status-indicator {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            display: inline-block;
+        }
+
+        .status-indicator.online {
+            background: #28a745;
+        }
+
+        .status-indicator.offline {
+            background: #dc3545;
+        }
+
+        @media (max-width: 768px) {
+            .container {
+                padding: 20px;
+                margin-top: 10px;
+            }
+
+            .header h1 {
+                font-size: 2em;
+            }
+
+            .upload-area {
+                padding: 20px;
+            }
+
+            .preview-container {
+                flex-direction: column;
+            }
+
+            .results-header {
+                flex-direction: column;
+                gap: 10px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🔍 OCR Text Recognition</h1>
+            <p>Upload an image and extract text using advanced deep learning</p>
+        </div>
+
+        <div class="api-status" id="apiStatus">
+            <span class="status-indicator" id="statusIndicator"></span>
+            <span id="statusText">API is online and ready</span>
+        </div>
+
+        <div class="model-info">
+            <h3>🤖 Spanish OCR Model</h3>
+            <p>Powered by CNN + BiLSTM + CTC architecture with attention mechanism</p>
+        </div>
+
+        <div class="upload-section">
+            <div class="upload-area" id="uploadArea">
+                <div class="upload-icon">📁</div>
+                <div class="upload-text">Click to upload or drag and drop</div>
+                <div class="upload-subtext">Supports JPG, PNG, JPEG files</div>
+                <input type="file" id="fileInput" accept="image/*">
+            </div>
+            <div style="text-align: center; margin-top: 20px;">
+                <button class="btn" onclick="document.getElementById('fileInput').click()">
+                    Choose Image
+                </button>
+                <button class="btn" id="processBtn" onclick="processImage()" disabled>
+                    Process Image
+                </button>
+            </div>
+        </div>
+
+        <div class="preview-section" id="previewSection">
+            <h3>📸 Image Preview</h3>
+            <div class="preview-container">
+                <div class="image-preview">
+                    <img id="imagePreview" alt="Preview">
+                </div>
+            </div>
+        </div>
+
+        <div class="loading" id="loadingSection">
+            <div class="spinner"></div>
+            <p>Processing image... Please wait</p>
+        </div>
+
+        <div class="results-section" id="resultsSection">
+            <div class="results-header">
+                <h3>📝 Extracted Text</h3>
+                <button class="btn copy-btn" onclick="copyText()">Copy Text</button>
+            </div>
+            <div class="results-text" id="resultsText"></div>
+        </div>
+
+        <div id="messageArea"></div>
+    </div>
+
+    <script>
+        // Since we're serving from the same origin, use relative URLs
+        const API_BASE_URL = window.location.origin;
         
-        # Preprocess all word images
-        processed_images = []
-        for word_img in word_images:
-            processed_img = preprocess_word_image(word_img)
-            if processed_img is not None:
-                processed_images.append(processed_img)
+        const uploadArea = document.getElementById('uploadArea');
+        const fileInput = document.getElementById('fileInput');
+        const processBtn = document.getElementById('processBtn');
+        const previewSection = document.getElementById('previewSection');
+        const imagePreview = document.getElementById('imagePreview');
+        const loadingSection = document.getElementById('loadingSection');
+        const resultsSection = document.getElementById('resultsSection');
+        const resultsText = document.getElementById('resultsText');
+        const messageArea = document.getElementById('messageArea');
+        const apiStatus = document.getElementById('apiStatus');
+        const statusIndicator = document.getElementById('statusIndicator');
+        const statusText = document.getElementById('statusText');
+
+        let selectedFile = null;
         
-        if not processed_images:
-            return []
-        
-        # Batch predict
-        batch_images = np.array(processed_images)
-        predictions = inference_model.predict(batch_images)
-        
-        # Decode predictions
-        decoded_texts = decode_prediction(predictions)
-        
-        # Apply character corrections
-        corrected_texts = [replace_chars(text) for text in decoded_texts]
-        
-        return corrected_texts
-        
-    except Exception as e:
-        logger.error(f"Error predicting word images: {e}")
-        return []
+        // Set status as online since we're serving from the same app
+        apiStatus.className = 'api-status online';
+        statusIndicator.className = 'status-indicator online';
+        statusText.textContent = 'API is online and ready';
+
+        // Drag and drop functionality
+        uploadArea.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            uploadArea.classList.add('dragover');
+        });
+
+        uploadArea.addEventListener('dragleave', (e) => {
+            e.preventDefault();
+            uploadArea.classList.remove('dragover');
+        });
+
+        uploadArea.addEventListener('drop', (e) => {
+            e.preventDefault();
+            uploadArea.classList.remove('dragover');
+            const files = e.dataTransfer.files;
+            if (files.length > 0) {
+                handleFileSelect(files[0]);
+            }
+        });
+
+        uploadArea.addEventListener('click', () => {
+            fileInput.click();
+        });
+
+        fileInput.addEventListener('change', (e) => {
+            if (e.target.files.length > 0) {
+                handleFileSelect(e.target.files[0]);
+            }
+        });
+
+        function handleFileSelect(file) {
+            if (!file.type.startsWith('image/')) {
+                showMessage('Please select a valid image file.', 'error');
+                return;
+            }
+
+            selectedFile = file;
+            processBtn.disabled = false;
+
+            // Show preview
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                imagePreview.src = e.target.result;
+                previewSection.style.display = 'block';
+            };
+            reader.readAsDataURL(file);
+
+            // Hide previous results
+            resultsSection.style.display = 'none';
+            clearMessages();
+        }
+
+        async function processImage() {
+            if (!selectedFile) {
+                showMessage('Please select an image first.', 'error');
+                return;
+            }
+
+            // Show loading
+            loadingSection.style.display = 'block';
+            resultsSection.style.display = 'none';
+            processBtn.disabled = true;
+
+            try {
+                const formData = new FormData();
+                formData.append('file', selectedFile); 
+
+                const response = await fetch(`${API_BASE_URL}/ocr/predict`, { 
+                    method: 'POST',
+                    body: formData
+                });
+
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+
+                const result = await response.json();
+
+                // Hide loading
+                loadingSection.style.display = 'none';
+                processBtn.disabled = false;
+
+                // Show results
+                if (result.status === 'success' && result.extracted_text) {
+                    resultsText.textContent = result.extracted_text;
+                    resultsSection.style.display = 'block';
+                    showMessage(`Text extraction completed successfully!`, 'success');
+                } else if (result.error) {
+                    showMessage(`Error: ${result.error}`, 'error');
+                } else {
+                    showMessage('No text could be extracted from the image.', 'error');
+                }
+
+            } catch (error) {
+                // Hide loading
+                loadingSection.style.display = 'none';
+                processBtn.disabled = false;
+                
+                console.error('Error processing image:', error);
+                showMessage(`Error processing image: ${error.message}`, 'error');
+            }
+        }
+
+        function copyText() {
+            const text = resultsText.textContent;
+            navigator.clipboard.writeText(text).then(() => {
+                showMessage('Text copied to clipboard!', 'success');
+            }).catch(() => {
+                showMessage('Failed to copy text to clipboard.', 'error');
+            });
+        }
+
+        function showMessage(message, type) {
+            clearMessages();
+            const messageDiv = document.createElement('div');
+            messageDiv.className = type;
+            messageDiv.textContent = message;
+            messageArea.appendChild(messageDiv);
+            
+            // Auto-hide after 5 seconds
+            setTimeout(() => {
+                messageDiv.remove();
+            }, 5000);
+        }
+
+        function clearMessages() {
+            messageArea.innerHTML = '';
+        }
+    </script>
+</body>
+</html>
+"""
 
 @app.on_event("startup")
 async def startup_event():
@@ -605,6 +805,12 @@ async def startup_event():
     except Exception as e:
         logger.error(f"Failed to initialize API: {e}")
         raise
+
+# Serve the HTML frontend at the root
+@app.get("/", response_class=HTMLResponse)
+async def serve_frontend():
+    """Serve the HTML frontend"""
+    return HTMLResponse(content=HTML_TEMPLATE)
 
 @app.post("/ocr/predict", response_model=Dict[str, Any])
 async def predict_text(file: UploadFile = File(...)):
@@ -690,21 +896,10 @@ async def predict_text(file: UploadFile = File(...)):
 
             full_text = ''.join(formatted_output)
 
-
-            # if not output_folder:
-            #     raise HTTPException(status_code=404, detail="No word images extracted")
-            
-
-            # # Predict text from word images
-            # predictions = predict_word_images(word_images)
-            # # Combine predictions into full text
-            # full_text = ' '.join(predictions)
             print(full_text)
             return {
                 "status": "success",
                 "extracted_text": full_text,
-                # "word_count": len(predictions),
-                # "words": predictions,
                 "message": "Text extracted successfully"
             }
             
@@ -718,18 +913,6 @@ async def predict_text(file: UploadFile = File(...)):
 async def health_check():
     """Health check endpoint"""
     return {"status": "healthy", "model_loaded": inference_model is not None}
-
-@app.get("/")
-async def root():
-    """Root endpoint"""
-    return {
-        "message": "Spanish OCR API",
-        "version": "1.0.0",
-        "endpoints": {
-            "predict": "/ocr/predict",
-            "health": "/health"
-        }
-    }
 
 if __name__ == "__main__":
     import uvicorn
