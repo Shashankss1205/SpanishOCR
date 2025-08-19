@@ -3,6 +3,7 @@ Flask-CORS==4.0.0
 uvicorn
 gunicorn==21.2.0
 fastapi
+python-multipart
 
 PyMuPDF 
 python-docx 
