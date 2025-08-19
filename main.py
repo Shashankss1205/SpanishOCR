@@ -99,7 +99,7 @@ def load_model_and_setup():
         # )
         
         # Load your trained model
-        model_path = '../Submission/ocr_model_NEW.h5'  # Update with your model path
+        model_path = 'ocr_model_NEW.h5'  # Update with your model path
         if os.path.exists(model_path):
             full_model = keras.models.load_model(model_path, compile=False, custom_objects={'CTCLayer': CTCLayer})
             # Create inference model
