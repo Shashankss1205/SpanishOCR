@@ -9,8 +9,8 @@ PyMuPDF
 python-docx 
 opencv-python 
 scipy 
-# torch 
-# torchvision==0.2.1 
+torch 
+torchvision==0.2.1 
 # tensorflow==2.15 
 pydot
 numpy==1.24.3
